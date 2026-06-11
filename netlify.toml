@@ -1,0 +1,25 @@
+# netlify.toml
+# =============
+# This file tells Netlify how to build and serve the site.
+# No build step is needed because the site is plain HTML.
+# The [functions] block tells Netlify where the serverless functions live.
+
+[build]
+  publish = "."           # serve files from the root of the repo
+  functions = "netlify/functions"  # look here for serverless functions
+
+# Redirect all calls to /api/chat to the serverless function.
+# The browser code uses /api/chat as its endpoint.
+[[redirects]]
+  from = "/api/chat"
+  to = "/.netlify/functions/chat"
+  status = 200
+
+# Security headers - applied to every page
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self'"

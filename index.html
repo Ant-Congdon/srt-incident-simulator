@@ -1,0 +1,1119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SRT Incident Response Simulator</title>
+
+  <!--
+    jsPDF is loaded from cdnjs for client-side PDF generation.
+    The Content-Security-Policy in netlify.toml allows this domain.
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <style>
+    /* ================================================================
+       DESIGN TOKENS
+       SRT brand palette and typography scale.
+       Every colour decision derives from these variables.
+    ================================================================ */
+    :root {
+      --green-hero:    #648000;
+      --green-dark:    #5c7400;
+      --green-darker:  #4a6000;
+      --green-deep:    #2d4a00;
+      --green-tint:    #eef3df;
+      --green-light:   #f4f7e8;
+      --paper:         #ffffff;
+      --card:          #f8f8f8;
+      --ink:           #1f2a17;
+      --muted:         #5d6b4e;
+      --line:          #d9e0c8;
+      --rail-off:      rgba(255,255,255,0.35);
+      --rail-on:       #ffffff;
+
+      --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+
+      --radius: 10px;
+      --shadow: 0 1px 4px rgba(45,74,0,0.10);
+    }
+
+    /* ================================================================
+       RESET AND BASE
+    ================================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--green-light);
+      color: var(--ink);
+      min-height: 100vh;
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
+
+    /* ================================================================
+       LAYOUT SHELL
+    ================================================================ */
+    .app-wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-height: 100vh;
+    }
+
+    /* ================================================================
+       HEADER + PROGRESS RAIL
+    ================================================================ */
+    .srt-header {
+      background: var(--green-dark);
+      color: #fff;
+      border-radius: var(--radius);
+      padding: 18px 22px;
+    }
+
+    .srt-header .org {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      opacity: 0.8;
+      margin-bottom: 2px;
+    }
+
+    .srt-header h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    /* The six-step progress rail */
+    .rail {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 6px;
+    }
+
+    .rail-step {
+      text-align: center;
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--rail-off);
+      border-top: 3px solid var(--rail-off);
+      padding-top: 6px;
+      transition: color 0.3s, border-color 0.3s;
+    }
+
+    .rail-step.done    { color: var(--rail-on); border-color: rgba(255,255,255,0.55); }
+    .rail-step.current { color: var(--rail-on); border-color: var(--rail-on);
+                         animation: pulse 1.8s ease-in-out infinite; }
+
+    @keyframes pulse { 50% { border-color: rgba(255,255,255,0.35); } }
+
+    /* ================================================================
+       START SCREEN (shown before the student begins)
+    ================================================================ */
+    .start-screen {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .start-screen h2 {
+      color: var(--green-deep);
+      font-size: 1.1rem;
+      margin-bottom: 14px;
+    }
+
+    .start-screen p {
+      color: var(--muted);
+      margin-bottom: 12px;
+      max-width: 680px;
+    }
+
+    /* Student name/ID fields on the start screen */
+    .start-fields {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 18px 0;
+      max-width: 500px;
+    }
+
+    .start-fields label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--green-deep);
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .start-fields input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-family: var(--font-body);
+      font-size: 0.9rem;
+      color: var(--ink);
+    }
+
+    .start-fields input:focus {
+      outline: 2px solid var(--green-dark);
+      outline-offset: 1px;
+    }
+
+    .safety-box {
+      background: var(--green-tint);
+      border-left: 5px solid var(--green-darker);
+      border-radius: 8px;
+      padding: 13px 16px;
+      font-size: 0.85rem;
+      margin: 18px 0;
+      max-width: 680px;
+    }
+
+    .safety-box strong { color: var(--green-deep); }
+
+    /* ================================================================
+       MAIN WORKING AREA (two columns: chat | notes)
+    ================================================================ */
+    .work-area {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    @media (max-width: 720px) {
+      .work-area { grid-template-columns: 1fr; }
+      .rail { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    /* ================================================================
+       CHAT COLUMN
+    ================================================================ */
+    .chat-col {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* The transcript area */
+    .chat-box {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      min-height: 360px;
+      max-height: 58vh;
+      overflow-y: auto;
+      box-shadow: var(--shadow);
+    }
+
+    /* Individual message bubbles */
+    .msg {
+      border-radius: 9px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-size: 0.9rem;
+    }
+
+    /* SRT / incident side */
+    .msg.ai {
+      background: var(--card);
+      border-left: 5px solid var(--green-hero);
+    }
+
+    /* Student side */
+    .msg.you {
+      background: var(--green-tint);
+      border-left: 5px solid var(--green-darker);
+    }
+
+    .msg .who {
+      display: block;
+      font-size: 0.67rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--green-deep);
+      margin-bottom: 5px;
+    }
+
+    /* Monospace treatment for IOCs, log lines, ticket IDs */
+    .msg code {
+      font-family: var(--font-mono);
+      background: rgba(45,74,0,0.07);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 0.84em;
+    }
+
+    /* Typing indicator */
+    .typing-indicator {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 6px 4px;
+    }
+
+    /* Input row */
+    .input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .input-row textarea {
+      flex: 1;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 13px;
+      font-family: var(--font-body);
+      font-size: 0.92rem;
+      resize: none;
+      min-height: 52px;
+      color: var(--ink);
+    }
+
+    .input-row textarea:focus {
+      outline: 2px solid var(--green-dark);
+      outline-offset: 1px;
+    }
+
+    /* ================================================================
+       NOTES COLUMN (SitRep + Logbook)
+    ================================================================ */
+    .notes-col {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .notes-section h2 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--green-deep);
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    /* SitRep is a structured table of labelled fields */
+    .sitrep-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+
+    .sitrep-table tr {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .sitrep-table tr:last-child {
+      border-bottom: none;
+    }
+
+    /* Field label cell */
+    .sitrep-table td.field-label {
+      font-weight: 600;
+      color: var(--green-deep);
+      padding: 7px 8px 7px 0;
+      vertical-align: top;
+      width: 42%;
+      font-size: 0.78rem;
+      line-height: 1.3;
+    }
+
+    /* Editable input cell */
+    .sitrep-table td.field-value {
+      padding: 4px 0;
+      vertical-align: top;
+    }
+
+    /* Each editable field is a plain contenteditable div */
+    .sitrep-table .field-input {
+      min-height: 28px;
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      padding: 4px 6px;
+      font-family: var(--font-body);
+      font-size: 0.82rem;
+      color: var(--ink);
+      outline: none;
+      line-height: 1.4;
+    }
+
+    .sitrep-table .field-input:focus {
+      border-color: var(--green-hero);
+      background: var(--green-tint);
+    }
+
+    .sitrep-table .field-input:empty::before {
+      content: attr(data-placeholder);
+      color: #aab89a;
+      pointer-events: none;
+    }
+
+    /* Logbook is a single textarea */
+    .logbook-area {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      resize: vertical;
+      min-height: 130px;
+      color: var(--ink);
+    }
+
+    .logbook-area:focus {
+      outline: 2px solid var(--green-dark);
+      outline-offset: 1px;
+    }
+
+    /* Divider between SitRep and Logbook */
+    .notes-divider {
+      border: none;
+      border-top: 1px solid var(--line);
+    }
+
+    /* Button row at the bottom of the notes panel */
+    .notes-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    /* ================================================================
+       BUTTONS
+    ================================================================ */
+    .btn {
+      font-family: var(--font-body);
+      font-weight: 600;
+      border: none;
+      border-radius: var(--radius);
+      padding: 10px 20px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      transition: background 0.15s;
+    }
+
+    .btn-primary {
+      background: var(--green-dark);
+      color: #ffffff;
+    }
+    .btn-primary:hover { background: var(--green-darker); }
+    .btn-primary:disabled { background: var(--line); cursor: not-allowed; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--green-dark);
+      border: 1px solid var(--green-dark);
+      padding: 7px 14px;
+      font-size: 0.78rem;
+    }
+    .btn-ghost:hover { background: var(--green-tint); }
+
+    .btn:focus-visible {
+      outline: 3px solid var(--green-deep);
+      outline-offset: 2px;
+    }
+
+    /* ================================================================
+       UTILITIES
+    ================================================================ */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="app-wrap">
+
+  <!-- ============================================================
+       HEADER
+  ============================================================ -->
+  <header class="srt-header">
+    <div class="org">South Regional Technologies &mdash; BSBXCS302</div>
+    <h1>Cyber Incident Response Simulator</h1>
+    <!-- Six-step progress rail -->
+    <div class="rail" id="rail" aria-label="Simulation progress">
+      <div class="rail-step" data-step="1">Triage</div>
+      <div class="rail-step" data-step="2">Evidence</div>
+      <div class="rail-step" data-step="3">Identify</div>
+      <div class="rail-step" data-step="4">Contain</div>
+      <div class="rail-step" data-step="5">Notify</div>
+      <div class="rail-step" data-step="6">Close</div>
+    </div>
+  </header>
+
+  <!-- ============================================================
+       START SCREEN
+  ============================================================ -->
+  <div class="start-screen" id="startScreen">
+    <h2>Before you begin</h2>
+    <p>You are a tier 1 analyst on the service desk at South Regional Technologies. A ticket is about to arrive. Work through the incident across six decision points. At each one, type what you would do and, just as importantly, why.</p>
+    <p>Use the Situation Report and Logbook panels beside the chat as you go. Keep the SitRep current and log every decision with the time, the action and your reasoning.</p>
+
+    <div class="safety-box">
+      <strong>Safety note:</strong> This exercise uses some real malicious indicators so you can practise looking them up in threat intelligence tools. Submit them to AbuseIPDB, VirusTotal, URLhaus or URLScan.io for analysis only. Do not open, browse to, download or run any URL or file. Web addresses are shown defanged (hxxps and [.]) on purpose. Only re-type them inside an analysis tool, never in a browser address bar.
+    </div>
+
+    <!-- Capture student details for the PDF and Supabase record -->
+    <div class="start-fields">
+      <div>
+        <label for="studentName">Your name</label>
+        <input type="text" id="studentName" placeholder="e.g. Olivia Smith" autocomplete="name">
+      </div>
+      <div>
+        <label for="studentId">Student ID</label>
+        <input type="text" id="studentId" placeholder="e.g. S12345678">
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="beginBtn">Start the incident</button>
+  </div>
+
+  <!-- ============================================================
+       MAIN WORKING AREA (hidden until simulation starts)
+  ============================================================ -->
+  <div class="work-area hidden" id="workArea">
+
+    <!-- LEFT: chat transcript + input -->
+    <div class="chat-col">
+      <div class="chat-box" id="chatBox" role="log" aria-live="polite" aria-label="Incident chat"></div>
+
+      <div class="input-row">
+        <textarea id="inputText" rows="2"
+          placeholder="Type your action and reasoning, then press Enter to send (Shift+Enter for a new line)"
+          aria-label="Your response"></textarea>
+        <button class="btn btn-primary" id="sendBtn">Send</button>
+      </div>
+    </div>
+
+    <!-- RIGHT: Situation Report + Logbook -->
+    <div class="notes-col">
+
+      <!-- SITUATION REPORT - fields match the SRT / ACSC template -->
+      <div class="notes-section">
+        <h2>Situation Report</h2>
+        <table class="sitrep-table" aria-label="Situation Report fields">
+          <tbody>
+            <tr>
+              <td class="field-label">Date and time incident detected</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="detected_at"
+                     data-placeholder="e.g. 12 Jun 2025, 09:14 AWST"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Current status</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="status"
+                     data-placeholder="New / In Progress / Resolved"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Incident type</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="incident_type"
+                     data-placeholder="e.g. Phishing, Malware, Data Breach"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Incident classification</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="classification"
+                     data-placeholder="Critical / High / Medium / Low"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Scope (affected systems, networks, applications)</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="scope"
+                     data-placeholder="List affected systems and highlight changes"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Impact (affected stakeholders)</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="impact"
+                     data-placeholder="Who is affected and how"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Severity</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="severity"
+                     data-placeholder="Impact on organisation and public safety"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Notifications actioned</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="notifications"
+                     data-placeholder="Tier 2, client, ACSC, OAIC"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Assistance required</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="assistance"
+                     data-placeholder="ACSC, law enforcement, other"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Recommended actions to resolve</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="actions"
+                     data-placeholder="Immediate and follow-up actions"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Additional notes</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="notes"
+                     data-placeholder="Any other relevant information"></div>
+              </td>
+            </tr>
+            <tr>
+              <td class="field-label">Incident manager contact</td>
+              <td class="field-value">
+                <div class="field-input" contenteditable="true"
+                     data-field="contact"
+                     data-placeholder="Name, role, contact details"></div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <hr class="notes-divider">
+
+      <!-- INCIDENT RESPONDER'S LOGBOOK -->
+      <div class="notes-section">
+        <h2>Incident Responder's Logbook</h2>
+        <textarea class="logbook-area" id="logbook"
+          placeholder="[Date / time]  Action taken — reasoning
+[Date / time]  Action taken — reasoning"
+          aria-label="Incident Responders Logbook"></textarea>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="notes-actions">
+        <button class="btn btn-primary" id="pdfBtn">Download as PDF</button>
+        <button class="btn btn-ghost" id="restartBtn">New incident</button>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- ================================================================
+     JAVASCRIPT
+================================================================ -->
+<script>
+(function () {
+  "use strict";
+
+  /* ----------------------------------------------------------------
+     STATE
+     history holds the full conversation for context on every call.
+  ---------------------------------------------------------------- */
+  var history      = [];
+  var busy         = false;
+  var studentName  = "";
+  var studentId    = "";
+
+  /* ----------------------------------------------------------------
+     ELEMENT REFERENCES
+  ---------------------------------------------------------------- */
+  var startScreen = document.getElementById("startScreen");
+  var workArea    = document.getElementById("workArea");
+  var chatBox     = document.getElementById("chatBox");
+  var inputText   = document.getElementById("inputText");
+  var sendBtn     = document.getElementById("sendBtn");
+  var beginBtn    = document.getElementById("beginBtn");
+  var restartBtn  = document.getElementById("restartBtn");
+  var pdfBtn      = document.getElementById("pdfBtn");
+  var logbook     = document.getElementById("logbook");
+  var railSteps   = document.querySelectorAll(".rail-step");
+
+  /* ----------------------------------------------------------------
+     getSitrepData
+     Reads all the contenteditable SitRep fields into an object.
+  ---------------------------------------------------------------- */
+  function getSitrepData() {
+    var data = {};
+    document.querySelectorAll(".field-input").forEach(function (el) {
+      data[el.getAttribute("data-field")] = el.innerText.trim();
+    });
+    return data;
+  }
+
+  /* ----------------------------------------------------------------
+     addMessage
+     Draws one bubble in the chat transcript.
+  ---------------------------------------------------------------- */
+  function addMessage(who, text) {
+    var bubble = document.createElement("div");
+    bubble.className = "msg " + who;
+
+    var label = document.createElement("span");
+    label.className = "who";
+    label.textContent = (who === "you") ? "You" : "SRT Service Desk";
+    bubble.appendChild(label);
+
+    var body = document.createElement("div");
+    body.textContent = text;
+    bubble.appendChild(body);
+
+    chatBox.appendChild(bubble);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  /* ----------------------------------------------------------------
+     showTyping / hideTyping
+  ---------------------------------------------------------------- */
+  function showTyping() {
+    var t = document.createElement("div");
+    t.className = "typing-indicator";
+    t.id = "typingIndicator";
+    t.textContent = "SRT Service Desk is responding...";
+    chatBox.appendChild(t);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+  function hideTyping() {
+    var t = document.getElementById("typingIndicator");
+    if (t) { t.remove(); }
+  }
+
+  /* ----------------------------------------------------------------
+     updateRail
+     Lights up the progress steps. n is the current decision point.
+  ---------------------------------------------------------------- */
+  function updateRail(n) {
+    railSteps.forEach(function (el) {
+      var step = parseInt(el.getAttribute("data-step"), 10);
+      el.classList.remove("done", "current");
+      if (step < n)       { el.classList.add("done"); }
+      else if (step === n) { el.classList.add("current"); }
+    });
+  }
+
+  /* ----------------------------------------------------------------
+     parseTags
+     Strips hidden [[DP:N]] interface tags and advances the rail.
+     Returns the cleaned display text.
+  ---------------------------------------------------------------- */
+  function parseTags(text) {
+    if (/\[\[DP:DONE\]\]/.test(text)) {
+      updateRail(7);                        // all steps complete
+      triggerSessionSave();                 // save to Supabase
+    } else {
+      var m = text.match(/\[\[DP:(\d)\]\]/);
+      if (m) { updateRail(parseInt(m[1], 10)); }
+    }
+    return text.replace(/\[\[DP:[^\]]*\]\]/g, "").trim();
+  }
+
+  /* ----------------------------------------------------------------
+     callAPI
+     Sends the conversation history to the Netlify function.
+     The function holds the API key; the browser never sees it.
+  ---------------------------------------------------------------- */
+  async function callAPI(saveSession) {
+    var payload = { messages: history };
+    if (saveSession) { payload.saveSession = saveSession; }
+
+    var response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    // Read body as text first so non-JSON errors are readable
+    var raw = await response.text();
+    var data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      throw new Error("Unexpected server response: " + raw.slice(0, 150));
+    }
+
+    if (data.error) { throw new Error(data.error); }
+    if (!data.reply) { throw new Error("Empty reply received."); }
+    return data.reply;
+  }
+
+  /* ----------------------------------------------------------------
+     sendTurn
+     The main send/receive loop. Retries once on failure.
+  ---------------------------------------------------------------- */
+  async function sendTurn(userText, showUser) {
+    if (busy) { return; }
+    busy = true;
+    sendBtn.disabled = true;
+
+    history.push({ role: "user", content: userText });
+    if (showUser) { addMessage("you", userText); }
+
+    showTyping();
+
+    var reply = null;
+    var lastErr = null;
+
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        reply = await callAPI(null);
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 1) {
+          await new Promise(function (r) { setTimeout(r, 1800); });
+        }
+      }
+    }
+
+    hideTyping();
+
+    if (reply) {
+      history.push({ role: "assistant", content: reply });
+      var clean = parseTags(reply);
+      addMessage("ai", clean);
+    } else {
+      var reason = lastErr ? lastErr.message : "unknown error";
+      addMessage("ai", "That did not come through. Press Send to try again.\n(Error: " + reason + ")");
+      history.pop();
+    }
+
+    busy = false;
+    sendBtn.disabled = false;
+    inputText.focus();
+  }
+
+  /* ----------------------------------------------------------------
+     triggerSessionSave
+     Called once the simulation ends ([[DP:DONE]]). Sends the full
+     session to the Netlify function, which saves it to Supabase.
+  ---------------------------------------------------------------- */
+  function triggerSessionSave() {
+    var sitrep = getSitrepData();
+    var session = {
+      studentName:  studentName,
+      studentId:    studentId,
+      incidentType: sitrep.incident_type || null,
+      sitrep:       JSON.stringify(sitrep),
+      logbook:      logbook.value,
+      transcript:   buildTranscriptText()
+    };
+    // Fire and forget - failure is logged server-side, not shown to student
+    fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: history, saveSession: session })
+    }).catch(function () {});
+  }
+
+  /* ----------------------------------------------------------------
+     buildTranscriptText
+     Turns the history array into a readable plain-text transcript.
+  ---------------------------------------------------------------- */
+  function buildTranscriptText() {
+    return history
+      .filter(function (t) { return t.content !== "Begin the simulation now."; })
+      .map(function (t) {
+        var who = (t.role === "user") ? "YOU" : "SRT SERVICE DESK";
+        var clean = t.content.replace(/\[\[DP:[^\]]*\]\]/g, "").trim();
+        return who + ":\n" + clean;
+      })
+      .join("\n\n---\n\n");
+  }
+
+  /* ----------------------------------------------------------------
+     downloadPDF
+     Generates a formatted PDF using jsPDF.
+     Layout mirrors the SRT Situation Report template with the
+     Logbook and transcript appended.
+  ---------------------------------------------------------------- */
+  function downloadPDF() {
+    var sitrep = getSitrepData();
+    var jsPDF  = window.jspdf.jsPDF;
+    var doc    = new jsPDF({ unit: "mm", format: "a4" });
+
+    var pageW  = doc.internal.pageSize.getWidth();
+    var pageH  = doc.internal.pageSize.getHeight();
+    var margin = 18;
+    var col    = pageW - margin * 2;
+    var y      = margin;
+
+    /* Helper: add text, wrapping if needed, returning new y */
+    function addText(text, x, startY, maxW, fontSize, style, colour) {
+      doc.setFontSize(fontSize || 10);
+      doc.setFont("helvetica", style || "normal");
+      doc.setTextColor(colour || "#1f2a17");
+      var lines = doc.splitTextToSize(text || "", maxW || col);
+      lines.forEach(function (line) {
+        if (startY > pageH - margin) {
+          doc.addPage();
+          startY = margin;
+        }
+        doc.text(line, x, startY);
+        startY += (fontSize || 10) * 0.45;
+      });
+      return startY;
+    }
+
+    /* Header banner */
+    doc.setFillColor(92, 116, 0);          // --green-dark
+    doc.rect(0, 0, pageW, 28, "F");
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor("#ffffff");
+    doc.text("South Regional Technologies  |  BSBXCS302 Cyber Incident Response Simulator", margin, 11);
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text("Situation Report", margin, 21);
+    y = 36;
+
+    /* Student details row */
+    if (studentName || studentId) {
+      doc.setFontSize(9);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor("#5d6b4e");
+      doc.text("Student: " + (studentName || "—") + "   |   ID: " + (studentId || "—") +
+               "   |   Generated: " + new Date().toLocaleString("en-AU"), margin, y);
+      y += 8;
+    }
+
+    /* Thin rule */
+    doc.setDrawColor(217, 224, 200);
+    doc.line(margin, y, pageW - margin, y);
+    y += 6;
+
+    /* SitRep fields - label : value rows */
+    var fields = [
+      ["Date and time incident detected",          sitrep.detected_at],
+      ["Current status",                           sitrep.status],
+      ["Incident type",                            sitrep.incident_type],
+      ["Incident classification",                  sitrep.classification],
+      ["Scope (affected systems, networks, apps)", sitrep.scope],
+      ["Impact (affected stakeholders)",           sitrep.impact],
+      ["Severity",                                 sitrep.severity],
+      ["Notifications actioned",                   sitrep.notifications],
+      ["Assistance required",                      sitrep.assistance],
+      ["Recommended actions to resolve",           sitrep.actions],
+      ["Additional notes",                         sitrep.notes],
+      ["Incident manager contact",                 sitrep.contact],
+    ];
+
+    var labelW = 70;   // width for the label column
+    var valueX = margin + labelW + 4;
+    var valueW = col - labelW - 4;
+
+    fields.forEach(function (pair) {
+      var label = pair[0];
+      var value = pair[1] || "";
+
+      if (y > pageH - 30) { doc.addPage(); y = margin; }
+
+      /* Row background (alternating) */
+      var rowBg = (fields.indexOf(pair) % 2 === 0) ? "#f8f8f8" : "#ffffff";
+      doc.setFillColor(rowBg);
+      doc.rect(margin - 2, y - 4, col + 4, 14, "F");
+
+      /* Label */
+      doc.setFontSize(8.5);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(45, 74, 0);        // --green-deep
+      var labelLines = doc.splitTextToSize(label, labelW);
+      labelLines.forEach(function (l, i) {
+        doc.text(l, margin, y + (i * 4));
+      });
+
+      /* Value */
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor("#1f2a17");
+      var valueLines = doc.splitTextToSize(value || "(not completed)", valueW);
+      valueLines.forEach(function (l, i) {
+        doc.text(l, valueX, y + (i * 4));
+      });
+
+      var rowLines = Math.max(labelLines.length, valueLines.length);
+      y += rowLines * 4 + 6;
+    });
+
+    y += 4;
+    doc.setDrawColor(217, 224, 200);
+    doc.line(margin, y, pageW - margin, y);
+    y += 8;
+
+    /* ---- LOGBOOK ---- */
+    if (y > pageH - 40) { doc.addPage(); y = margin; }
+
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(45, 74, 0);
+    doc.text("Incident Responder's Logbook", margin, y);
+    y += 7;
+
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor("#1f2a17");
+
+    var logLines = (logbook.value || "(no logbook entries)").split("\n");
+    logLines.forEach(function (line) {
+      if (y > pageH - margin) { doc.addPage(); y = margin; }
+      var wrapped = doc.splitTextToSize(line, col);
+      wrapped.forEach(function (wl) {
+        if (y > pageH - margin) { doc.addPage(); y = margin; }
+        doc.text(wl, margin, y);
+        y += 5;
+      });
+    });
+
+    y += 6;
+    doc.setDrawColor(217, 224, 200);
+    doc.line(margin, y, pageW - margin, y);
+    y += 8;
+
+    /* ---- TRANSCRIPT ---- */
+    if (y > pageH - 40) { doc.addPage(); y = margin; }
+
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(45, 74, 0);
+    doc.text("Simulation Transcript", margin, y);
+    y += 7;
+
+    var transcript = buildTranscriptText();
+    var txLines    = transcript.split("\n");
+
+    txLines.forEach(function (line) {
+      if (y > pageH - margin) { doc.addPage(); y = margin; }
+
+      /* Style the speaker labels differently */
+      var isLabel = line === "YOU:" || line === "SRT SERVICE DESK:";
+      doc.setFontSize(isLabel ? 8 : 8.5);
+      doc.setFont("helvetica", isLabel ? "bold" : "normal");
+      doc.setTextColor(isLabel ? (45) : "#1f2a17");
+      if (isLabel) { doc.setTextColor(45, 74, 0); }
+
+      var wrapped = doc.splitTextToSize(line, col);
+      wrapped.forEach(function (wl) {
+        if (y > pageH - margin) { doc.addPage(); y = margin; }
+        doc.text(wl, margin, y);
+        y += 4.5;
+      });
+    });
+
+    /* Footer on every page */
+    var totalPages = doc.internal.getNumberOfPages();
+    for (var i = 1; i <= totalPages; i++) {
+      doc.setPage(i);
+      doc.setFontSize(7.5);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor("#aab89a");
+      doc.text(
+        "SRT Incident Response Simulator  |  BSBXCS302  |  Page " + i + " of " + totalPages,
+        pageW / 2, pageH - 8, { align: "center" }
+      );
+    }
+
+    /* Save with a meaningful filename */
+    var safeName = (studentName || "student").replace(/\s+/g, "_");
+    doc.save("SRT_SitRep_" + safeName + "_" + new Date().toISOString().slice(0, 10) + ".pdf");
+  }
+
+  /* ----------------------------------------------------------------
+     startIncident
+  ---------------------------------------------------------------- */
+  function startIncident() {
+    studentName = document.getElementById("studentName").value.trim();
+    studentId   = document.getElementById("studentId").value.trim();
+    startScreen.classList.add("hidden");
+    workArea.classList.remove("hidden");
+    updateRail(1);
+    sendTurn("Begin the simulation now.", false);
+  }
+
+  /* ----------------------------------------------------------------
+     restart
+  ---------------------------------------------------------------- */
+  function restart() {
+    if (!confirm("Start a new incident? Your current notes will be cleared.")) { return; }
+    history = [];
+    chatBox.innerHTML = "";
+    logbook.value = "";
+    document.querySelectorAll(".field-input").forEach(function (el) {
+      el.innerText = "";
+    });
+    updateRail(0);
+    workArea.classList.add("hidden");
+    startScreen.classList.remove("hidden");
+  }
+
+  /* ----------------------------------------------------------------
+     BUTTON WIRING
+  ---------------------------------------------------------------- */
+  beginBtn.addEventListener("click", startIncident);
+  restartBtn.addEventListener("click", restart);
+  pdfBtn.addEventListener("click", downloadPDF);
+
+  sendBtn.addEventListener("click", function () {
+    /* If the opening call failed, history is still empty.
+       Pressing Send retries the opening automatically. */
+    if (history.length === 0) {
+      sendTurn("Begin the simulation now.", false);
+      return;
+    }
+    var text = inputText.value.trim();
+    if (text) {
+      inputText.value = "";
+      sendTurn(text, true);
+    }
+  });
+
+  /* Enter sends; Shift+Enter creates a new line */
+  inputText.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendBtn.click();
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
