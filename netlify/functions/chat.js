@@ -155,7 +155,7 @@ Begin now. Generate the scenario silently, give the student the brief and safety
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-opus-4-5",   // use Opus for best instruction-following
+        model: "claude-sonnet-4-6",   // use Opus for best instruction-following
         max_tokens: 1024,
         temperature: 1,
         system: SYSTEM_PROMPT,
