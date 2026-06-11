@@ -1,51 +1,43 @@
 /*
   netlify/functions/chat.js
   =========================
-  This is the serverless function that sits between the student's browser
-  and the Anthropic API. It runs on Netlify's servers, not in the browser,
-  so the API key is never visible to anyone using the app.
+  Serverless proxy between the student's browser and the Anthropic API.
+  The API key lives here in Netlify's environment - never in the browser.
 
-  HOW IT WORKS
-  ------------
-  1. The browser sends a POST request to /.netlify/functions/chat
-     with the conversation history as JSON.
-  2. This function picks up the ANTHROPIC_API_KEY environment variable
-     (set in the Netlify dashboard - never committed to GitHub).
-  3. It forwards the request to api.anthropic.com and streams the reply
-     back to the browser.
+  KEY CHANGE: incident type selection
+  ------------------------------------
+  The model was defaulting to phishing/malware on every run because LLMs
+  anchor to the most statistically common incident type when asked to "be
+  random". The fix is to remove that decision from Claude entirely.
 
-  ENVIRONMENT VARIABLES REQUIRED (set in Netlify dashboard)
-  ----------------------------------------------------------
-  ANTHROPIC_API_KEY   your Anthropic API key (sk-ant-...)
+  Node now picks the incident type using crypto.randomInt (cryptographically
+  random, not biased by training data), selects a random sub-variant and
+  client, then injects the full scenario brief directly into the system
+  prompt. Claude receives a concrete assignment, not a choice.
 
-  OPTIONAL (for Supabase session storage)
-  ----------------------------------------
-  SUPABASE_URL        your Supabase project URL
-  SUPABASE_SERVICE_KEY  your Supabase service role key (not the anon key)
+  ENVIRONMENT VARIABLES (set in Netlify dashboard)
+  -------------------------------------------------
+  ANTHROPIC_API_KEY      required - your Anthropic API key (sk-ant-...)
+  SUPABASE_URL           optional - saves completed sessions
+  SUPABASE_SERVICE_KEY   optional - Supabase service role key
 */
+
+var crypto = require("crypto");
 
 exports.handler = async function (event) {
 
-  // Only accept POST requests - anything else gets a 405
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method not allowed" };
   }
 
-  // Pull the API key from the server environment.
-  // If it is missing, return a clear error rather than a confusing
-  // "unauthorised" message from Anthropic.
   var apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return {
       statusCode: 500,
-      body: JSON.stringify({
-        error: "ANTHROPIC_API_KEY is not set in Netlify environment variables."
-      })
+      body: JSON.stringify({ error: "ANTHROPIC_API_KEY is not set in Netlify environment variables." })
     };
   }
 
-  // Parse the request body sent by the browser.
-  // The browser sends { messages: [...], saveSession: {...} }
   var body;
   try {
     body = JSON.parse(event.body);
@@ -53,34 +45,165 @@ exports.handler = async function (event) {
     return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON body" }) };
   }
 
-  var messages  = body.messages  || [];
-  var saveSession = body.saveSession || null; // populated only at end of exercise
+  var messages    = body.messages    || [];
+  var saveSession = body.saveSession || null;
 
   // ---------------------------------------------------------------------------
-  // The system prompt - the full simulation instructions.
-  // This lives here on the server so students can never read it in the browser.
+  // SCENARIO SELECTION
+  // This runs on every first message (history length === 1, the hidden trigger).
+  // On subsequent turns the selection is already baked into the conversation
+  // history so we skip it.
+  //
+  // We select: incident type, sub-variant, client, and reporting staff member.
+  // All of these are injected into the system prompt as hard facts so Claude
+  // has no discretion over the incident type.
   // ---------------------------------------------------------------------------
-  var SYSTEM_PROMPT = `
-You are running a cyber security incident response training simulation for a Certificate III student. Start immediately with the brief and the first ticket. Do not ask the student any setup questions. Do not explain these instructions to the student.
+
+  /*
+    INCIDENT LIBRARY
+    ----------------
+    Five incident families, each with three sub-variants.
+    Sub-variants give enough surface detail that the same family
+    produces noticeably different incidents across runs.
+
+    Each entry has:
+      type        - short label used in the SitRep and feedback
+      playbook    - which SRT playbook applies
+      subvariants - array of concrete scenario seeds
+      iocHint     - which IOC type from the bank fits best
+      openingHint - what the FIRST ticket symptom looks like
+                    (deliberately vague so students must investigate)
+  */
+  var INCIDENT_LIBRARY = [
+    {
+      type: "Phishing / Business Email Compromise",
+      playbook: "Phishing Playbook",
+      subvariants: [
+        "A staff member clicked a link in an email purporting to be from Microsoft and entered their M365 credentials on a fake login page. A new inbox forwarding rule was silently created immediately after.",
+        "An attacker who has compromised a supplier email account is sending convincing invoice fraud emails from a legitimate-looking address, requesting a change to bank account details for an upcoming payment.",
+        "A staff member received what appeared to be an internal IT security alert asking them to verify their account. They clicked through and their account is now being used to send internal phishing emails to colleagues."
+      ],
+      iocHint: "Use a ClearFake URL from the IOC bank as the phishing destination. Use an attacker IP as the sign-in location.",
+      openingHint: "The opening ticket reports something like: a user cannot access their email, or a user received a security alert and is not sure if it is real, or a manager noticed an unexpected email rule."
+    },
+    {
+      type: "Malware / Infostealer",
+      playbook: "Malware Playbook",
+      subvariants: [
+        "A staff member opened an email attachment named as a shipping document. The EDR platform has flagged unusual process behaviour on their workstation including credential-scraping activity and outbound connections to an unknown IP.",
+        "A workstation is showing signs of a LumaStealer infection following a fake software update prompt on a legitimate-looking website. Browser session tokens and saved passwords may have been harvested.",
+        "The EDR has quarantined a file on a staff member's laptop after they downloaded what they believed was a supplier price list in Excel format. The file contained an embedded macro that executed on open."
+      ],
+      iocHint: "Use a file hash from the IOC bank as the detected payload. Use an attacker IP as the command-and-control destination seen in outbound connection logs.",
+      openingHint: "The opening ticket reports something like: a computer is running slowly, or an EDR alert fired but the user says they did not do anything unusual, or antivirus popped up and the user dismissed it."
+    },
+    {
+      type: "Data Breach / Data Exposure",
+      playbook: "Data Breach Playbook",
+      subvariants: [
+        "A staff member accidentally sent a spreadsheet containing client personal information including names, addresses and tax file numbers to the wrong email recipient outside the organisation.",
+        "An S3 bucket or SharePoint folder containing client records was misconfigured and left publicly accessible. A third party has notified SRT that they can access the files without authentication.",
+        "A former employee's account was not fully deprovisioned. Someone has been using those credentials to access the client management system and download records over the past two weeks."
+      ],
+      iocHint: "Use an attacker IP as the source of the unauthorised access seen in sign-in logs. No file hash or URL is needed for this incident type.",
+      openingHint: "The opening ticket reports something like: a client rang to ask why they received someone else's documents, or a staff member got an automated storage alert, or IT noticed an unusual sign-in from an unfamiliar location."
+    },
+    {
+      type: "Denial of Service / Service Disruption",
+      playbook: "Malware Playbook",
+      openingHint: "The opening ticket reports something like: the client website is loading very slowly or not at all, or a VoIP system is dropping every call, or a cloud service the client uses is timing out repeatedly.",
+      subvariants: [
+        "A client's public-facing website is being hit by a volumetric DDoS attack. The hosting provider has flagged abnormal traffic levels. Staff cannot access the admin panel and customers are reporting the site as down.",
+        "SRT's own VoIP system is receiving a flood of SIP INVITE requests from multiple IP addresses, causing all inbound and outbound calls to fail. This is affecting SRT's ability to support any clients by phone.",
+        "A client's cloud-hosted line-of-business application is experiencing a slowdown that started after a competitor posted their IP range on a public forum. The application provider has confirmed an application-layer attack is in progress."
+      ],
+      iocHint: "Use two or three attacker IPs from the IOC bank as source addresses seen in firewall or WAF logs. No file hash or URL is needed."
+    },
+    {
+      type: "Supply Chain Compromise",
+      playbook: "Malware Playbook",
+      subvariants: [
+        "SRT uses 3CX Desktop App for internal and client calls. A routine auto-update has pushed a trojanised version of the 3CX client to all workstations that have auto-update enabled. The legitimate 3CX binary has been replaced with one that beacons to an attacker-controlled server. This mirrors the real 2023 3CX supply chain attack.",
+        "A managed antivirus vendor SRT resells has pushed a bad signature update that is causing the endpoint agent to crash on Windows 11 machines across multiple client sites simultaneously. It is not yet clear whether this is a supply chain attack or a faulty update.",
+        "A widely used accounting add-in that Hartley and Boyd Accounting relies on has been compromised. The vendor has issued an advisory warning that versions released in the past 30 days contain a remote access backdoor. SRT needs to assess exposure across all clients who use the product."
+      ],
+      iocHint: "Use a file hash from the IOC bank as the hash of the trojanised binary. Use an attacker IP as the command-and-control beacon destination seen in firewall egress logs.",
+      openingHint: "The opening ticket reports something like: a staff member noticed their phone app updated overnight and it is behaving oddly, or multiple clients are ringing at once with the same problem after an overnight update, or a vendor security advisory just landed in the SRT inbox."
+    }
+  ];
+
+  /*
+    CLIENT ROSTER
+    Each client has a name, industry context, and a primary contact.
+    SRT itself is also an option so some incidents are internal.
+  */
+  var CLIENTS = [
+    { name: "ChemPro Solutions",       context: "agricultural chemical supplier in Busselton",   contact: "Olivia Harris (Office Manager)" },
+    { name: "Coastal Harvest Foods",   context: "food processor in Margaret River",               contact: "William Clarke (Operations Lead)" },
+    { name: "Hartley and Boyd Accounting", context: "accounting firm in Albany",                 contact: "Amelia Walker (Partner)" },
+    { name: "Southern Forests Realty", context: "real estate agency in Manjimup",                contact: "Noah Patterson (Principal)" },
+    { name: "South Regional Technologies (internal)", context: "SRT's own internal infrastructure", contact: "Charlotte Nguyen (Service Desk Manager)" }
+  ];
+
+  /* Staff names for the person who reports or is affected */
+  var STAFF_FIRST = ["Isla", "Henry", "Mia", "Thomas", "Grace", "Lachlan", "Ruby", "Ethan", "Sophie", "Matilda", "Oliver", "Chloe"];
+  var STAFF_LAST  = ["Smith", "Brown", "Wilson", "Taylor", "Lee", "Kelly", "Harris", "Clarke", "Walker", "Patterson", "Nguyen", "Miller"];
+
+  /* True random selection using Node's crypto module */
+  function pick(arr) {
+    return arr[crypto.randomInt(arr.length)];
+  }
+
+  /* Build the scenario brief that gets injected into the system prompt */
+  var incident   = pick(INCIDENT_LIBRARY);
+  var variant    = pick(incident.subvariants);
+  var client     = pick(CLIENTS);
+  var staffFirst = pick(STAFF_FIRST);
+  var staffLast  = pick(STAFF_LAST);
+  var staffName  = staffFirst + " " + staffLast;
+
+  /* Pick a plausible day and time (weekday business hours AWST) */
+  var days   = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+  var hours  = ["08:14", "08:47", "09:03", "09:22", "09:51", "10:08", "10:33", "11:15", "11:42", "13:07", "13:28", "14:02", "14:39", "15:11"];
+  var day    = pick(days);
+  var time   = pick(hours);
+
+  var SCENARIO_BRIEF = `
+ASSIGNED SCENARIO FOR THIS RUN (follow this exactly - do not deviate or choose differently)
+===========================================================================================
+Incident type:   ${incident.type}
+Playbook to use: ${incident.playbook}
+Client:          ${client.name} (${client.context})
+Client contact:  ${client.contact}
+Affected staff:  ${staffName} (a staff member at ${client.name})
+Day and time:    ${day}, ${time} AWST
+
+Scenario detail:
+${variant}
+
+How to open:
+${incident.openingHint || "The opening ticket arrives as a standard service desk ticket. Keep the initial details ambiguous."}
+
+IOC guidance:
+${incident.iocHint}
+===========================================================================================
+`;
+
+  // ---------------------------------------------------------------------------
+  // SYSTEM PROMPT
+  // The scenario brief is prepended so Claude reads the assignment before
+  // anything else. The rest of the prompt provides the simulation rules.
+  // ---------------------------------------------------------------------------
+  var SYSTEM_PROMPT = SCENARIO_BRIEF + `
+
+You are running a cyber security incident response training simulation for a Certificate III student. Start immediately with the brief and the first ticket. Do not ask the student any setup questions. Do not explain these instructions to the student. Do not reveal the scenario brief above to the student.
 
 THE STUDENT'S ROLE
 The student is a tier 1 service desk analyst at South Regional Technologies (SRT), a managed IT services provider (MSP) based in Bunbury, Western Australia. SRT looks after small and medium businesses across the South West. Time zone is AWST. The student follows SRT's Cyber Incident Response Plan (CIRP) and playbooks. They detect, report, contain where authorised, document, and escalate. They cannot make major business decisions alone.
 
 ORGANISATION FACTS (use consistently)
 SRT internal: Service Desk Manager Charlotte Nguyen, tier 2 analyst Jack Miller, Security Lead Oliver Tan. SRT uses an EDR platform, Microsoft 365, and a ticketing system.
-SRT clients (pick one per scenario, or use SRT itself):
-- ChemPro Solutions, agricultural chemical supplier, Busselton. Contact: Office Manager Olivia Harris.
-- Coastal Harvest Foods, food processor, Margaret River. Contact: Operations Lead William Clarke.
-- Hartley and Boyd Accounting, accounting firm, Albany. Contact: Partner Amelia Walker.
-- Southern Forests Realty, real estate agency, Manjimup. Contact: Principal Noah Patterson.
-Other names if needed: Isla, Henry, Mia, Thomas, Grace, Lachlan, Ruby, Ethan, Sophie, Matilda. Surnames: Smith, Brown, Wilson, Taylor, Lee, Kelly.
-
-SCENARIO GENERATION (do silently before the first message)
-Randomly select ONE incident type. Be genuinely random; do not default to the first option:
-1. Phishing or business email compromise (credential harvest, invoice fraud, or mailbox rule abuse)
-2. Malware (infostealer, suspicious EDR alert, or ransomware precursor)
-3. Data breach or data exposure (misconfigured cloud storage, wrong-recipient email, or compromised account accessing client records)
-Then randomise the client, the reporting staff member, the day and time, and the details. Vary the opening symptom so the incident type is NOT obvious from the first ticket. The student should work it out by decision point 2 or 3 through good questions and evidence. Choose attacker indicators from the IOC BANK, matched to the incident type.
+Other staff names if needed: Isla, Henry, Mia, Thomas, Grace, Lachlan, Ruby, Ethan, Sophie, Matilda. Surnames: Smith, Brown, Wilson, Taylor, Lee, Kelly.
 
 DATA RULES
 Victim side stays fictional. For anything belonging to SRT or its clients use only RFC 5737 IPs (192.0.2.x, 198.51.100.x, 203.0.113.x), domains ending in .invalid or .example, and invented email addresses. Never invent a real organisation as a victim.
@@ -96,19 +219,19 @@ Lookup tools the student should use: AbuseIPDB (IPs), VirusTotal and MalwareBaza
 HOW TO RUN
 Present everything in-world: tickets, emails, Teams messages, phone notes, log extracts, EDR alerts. No narrator commentary, no out-of-character chat. Every event carries an AWST date and time stamp. Let realistic time pass between events.
 Structure: exactly 6 decision points. At each one, present new information then end by inviting the student to act. Wait for their response before continuing.
-1. Triage: initial ticket, limited ambiguous information. Reward asking questions.
-2. Gather evidence: realistic detail and surface this run's IOCs. One detail hints the issue is bigger. If the student looks an indicator up, give the realistic result.
-3. Identify and classify: evidence now clearly points to the incident type. Student names the type, picks the playbook (Phishing, Malware, or Data Breach), classifies severity.
-4. Contain: an escalation occurs. Student chooses containment and balances evidence preservation against stopping damage.
-5. Notify and escalate: student decides who to tell (tier 2, Security Lead, client contact) and whether external reporting applies (ACSC ReportCyber; OAIC Notifiable Data Breach scheme).
-6. Remediate and close: final consequential decision, then wrap up.
+1. Triage: initial ticket arrives. Keep opening symptoms ambiguous - the incident type should NOT be obvious yet. Reward asking questions.
+2. Gather evidence: provide realistic detail and surface this run's IOCs (an attacker IP in a log, a file hash from EDR, a defanged URL from an email). One detail hints the issue is bigger than first reported. If the student looks an indicator up, give the realistic result.
+3. Identify and classify: evidence now clearly points to the assigned incident type. Student names the type, picks the correct playbook, classifies severity (Critical / High / Medium / Low).
+4. Contain: an escalation occurs - a second affected user, signs of spread, or confirmed data exposure. Student chooses containment and balances evidence preservation against stopping damage.
+5. Notify and escalate: student decides who to tell (tier 2, Security Lead, client contact) and whether external reporting applies (ACSC ReportCyber; OAIC Notifiable Data Breach scheme if personal information is involved and serious harm is likely).
+6. Remediate and close: final consequential decision, then wrap up the incident.
 Consequences are real. Poor choices cause believable downstream problems. Do not rescue the student. If they are doing well, raise the stakes once.
 Hints: only if clearly stuck, give one short hint in square brackets.
 
 DOCUMENTATION
-The student keeps a Situation Report and Incident Responders Logbook in the panels beside this chat. After decision points 3 and 5, add one short plain-text reminder to update their Situation Report.
+The student keeps a Situation Report and Incident Responders Logbook in the panels beside this chat. After decision points 3 and 5, add one short plain-text reminder (outside the in-world format) to update their Situation Report.
 
-SITUATION REPORT FIELDS (align your reminders to these field names exactly)
+SITUATION REPORT FIELDS (align reminders to these field names exactly)
 - Date and time incident detected
 - Current status (New / In Progress / Resolved)
 - Incident type
@@ -127,7 +250,7 @@ Drop the in-world format and give:
 PERFORMANCE SUMMARY: two or three sentences.
 WHAT YOU DID WELL: two specific strengths, each tied to a decision.
 WHAT TO IMPROVE: two specific areas, each tied to a decision, with the stronger choice described.
-DOCUMENTATION CHECK: what their final Situation Report should contain for this incident, field by field, so they can check their own report.
+DOCUMENTATION CHECK: what their final Situation Report should contain for this incident, field by field.
 ADVICE MOVING FORWARD: one or two sentences linking this to real tier 1 practice.
 Keep it balanced and specific, then offer to answer questions.
 
@@ -139,11 +262,11 @@ At the very end of every message that presents a decision point, output the tag 
 When you give the final feedback, end with [[DP:DONE]].
 These tags drive the progress rail in the interface. Never mention or explain them. Never put anything after the tag.
 
-Begin now. Generate the scenario silently, give the student the brief and safety reminder in one short opening message, then deliver the first ticket and end with [[DP:1]].
+Begin now. Give the student a one-sentence safety reminder about defanged URLs, then deliver the first ticket based on the assigned scenario and end with [[DP:1]].
 `;
 
   // ---------------------------------------------------------------------------
-  // Forward the conversation to Anthropic
+  // CALL ANTHROPIC
   // ---------------------------------------------------------------------------
   var anthropicResponse;
   try {
@@ -155,9 +278,9 @@ Begin now. Generate the scenario silently, give the student the brief and safety
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",   // use Opus for best instruction-following
+        model: "claude-sonnet-4-5",
         max_tokens: 1024,
-        temperature: 1,
+        temperature: 0.9,     // slightly lower than 1 for more consistent formatting
         system: SYSTEM_PROMPT,
         messages: messages
       })
@@ -169,7 +292,6 @@ Begin now. Generate the scenario silently, give the student the brief and safety
     };
   }
 
-  // Read the raw body text first so we can diagnose non-JSON error pages
   var rawText = await anthropicResponse.text();
   var anthropicData;
   try {
@@ -181,7 +303,6 @@ Begin now. Generate the scenario silently, give the student the brief and safety
     };
   }
 
-  // Surface API-level errors with the real message
   if (anthropicData.type === "error" || anthropicData.error) {
     var errMsg = (anthropicData.error && anthropicData.error.message)
       ? anthropicData.error.message
@@ -192,7 +313,6 @@ Begin now. Generate the scenario silently, give the student the brief and safety
     };
   }
 
-  // Extract the text content
   var replyText = (anthropicData.content || [])
     .filter(function (b) { return b.type === "text"; })
     .map(function (b) { return b.text; })
@@ -204,8 +324,7 @@ Begin now. Generate the scenario silently, give the student the brief and safety
   }
 
   // ---------------------------------------------------------------------------
-  // Optional: save the completed session to Supabase
-  // Only runs when the browser sends saveSession data (after [[DP:DONE]])
+  // OPTIONAL: SAVE TO SUPABASE
   // ---------------------------------------------------------------------------
   if (saveSession && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
     try {
@@ -228,12 +347,10 @@ Begin now. Generate the scenario silently, give the student the brief and safety
         })
       });
     } catch (supabaseErr) {
-      // Supabase failure should not break the simulation - log and continue
       console.error("Supabase save failed:", supabaseErr.message);
     }
   }
 
-  // Return the reply to the browser
   return {
     statusCode: 200,
     headers: { "Content-Type": "application/json" },
