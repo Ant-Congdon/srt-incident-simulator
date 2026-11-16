@@ -62,7 +62,7 @@ exports.handler = async function (event) {
   /*
     INCIDENT LIBRARY
     ----------------
-    Five incident families, each with three sub-variants.
+    Six incident families, each with three sub-variants.
     Sub-variants give enough surface detail that the same family
     produces noticeably different incidents across runs.
 
@@ -129,6 +129,40 @@ exports.handler = async function (event) {
       ],
       iocHint: "Use a file hash from the IOC bank as the hash of the trojanised binary. Use an attacker IP as the command-and-control beacon destination seen in firewall egress logs.",
       openingHint: "The opening ticket reports something like: a staff member noticed their phone app updated overnight and it is behaving oddly, or multiple clients are ringing at once with the same problem after an overnight update, or a vendor security advisory just landed in the SRT inbox."
+    },
+    {
+      /*
+        AGENTIC AI-DRIVEN INTRUSION (ARTEX-style)
+        -----------------------------------------
+        Based on public reporting (Sophos, CrowdStrike, SOCRadar, Oct-Nov 2026)
+        on ARTEX, an open-source agentic penetration testing framework used by
+        several threat actors. The tactics are familiar. What changes is the
+        speed, the volume of log noise and the way the attacker switches to
+        another path each time one is closed.
+
+        This entry uses two extra fields that the other entries do not need:
+          revealSchedule - what to show at each decision point, so the
+                           noisy scenario still follows the same six-step arc
+          maxTokens      - a higher reply limit for the longer log extracts
+      */
+      type: "Agentic AI-Driven Intrusion",
+      playbook: "Data Breach Playbook",
+      subvariants: [
+        "The client's Microsoft 365 sign-in is being hit by automated password spraying and account recovery abuse from many IP addresses. One staff account has been compromised. The attacker has begun reading mailboxes and testing access to other accounts.",
+        "An internet-facing web application at the client has been exploited and a web shell dropped. Credentials were then harvested from the server and the attacker is moving toward the file server and the backup server.",
+        "The client's remote access gateway was reached with a weak, reused password. Automated tooling is mapping the internal network, trying service accounts and probing the file server and backup server from inside."
+      ],
+      iocHint: "Use four to six attacker IPs from the IOC bank as the spray and scan sources. One of them is the source of the single successful sign-in or login. No file hash or URL is needed. Do not use any indicator outside the bank.",
+      openingHint: "The opening ticket reports something like: the client received a flood of failed sign-in alert emails, or staff say email and the internet are slow, or a manager reports a stack of password reset emails nobody asked for. It must NOT look like an attack yet.",
+      revealSchedule: [
+        "DP1 Triage: vague ticket only. Many failed sign-in or reset notices, one or two slow systems. Nothing says compromise.",
+        "DP2 Evidence: heavy log noise. Show a short extract of no more than 8 lines plus counts (for example thousands of failed sign-ins in minutes, many source IPs, many accounts). Show timestamps that prove machine tempo, such as a burst of events within seconds. Hide one successful sign-in or login among the failures. Surface the attacker IPs here.",
+        "DP3 Identify: the evidence now points to automated, machine-speed intrusion that has already succeeded once. The student should name it and pick the Data Breach Playbook. A student who looks up the IPs gets a positive result. You may include one tool-signature clue (a response header or user agent consistent with public reporting on the ARTEX framework) but the student must not need to know the tool name to succeed. Scope is still unclear.",
+        "DP4 Contain: the student locks down what a tier 1 analyst can lock down (disable or reset accounts, revoke sessions, block IPs, isolate single endpoints). Each closed path is followed by new activity on a different path, for example a service account, a second tenant or user, or the backup server. Make it clear that lockdown alone is not stopping this.",
+        "DP5 Escalate: scope is now wide and the backup server or file server is at risk. Taking the whole client network offline is a business decision above tier 1. The student must recommend it with a business impact case and get approval from Security Lead Oliver Tan and the client contact. Decide the consequences from their timing and reasoning.",
+        "DP6 Recover and close: staged recovery after the network is offline or the activity is contained. The student decides what to restore first, which credentials to rotate, what to verify before reconnecting, and what to recommend (multi-factor authentication, patching, less exposure to the internet)."
+      ].join("\n"),
+      maxTokens: 1400
     }
   ];
 
@@ -186,7 +220,7 @@ ${incident.openingHint || "The opening ticket arrives as a standard service desk
 
 IOC guidance:
 ${incident.iocHint}
-===========================================================================================
+${incident.revealSchedule ? "\nReveal schedule (follow this exactly so the exercise keeps its six-step arc):\n" + incident.revealSchedule + "\n" : ""}===========================================================================================
 `;
 
   // ---------------------------------------------------------------------------
@@ -279,7 +313,7 @@ Begin now. Give the student a one-sentence safety reminder about defanged URLs, 
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
-        max_tokens: 1024,
+        max_tokens: incident.maxTokens || 1024,   // longer limit for the noisy agentic scenario
         temperature: 0.9,     // slightly lower than 1 for more consistent formatting
         system: SYSTEM_PROMPT,
         messages: messages
